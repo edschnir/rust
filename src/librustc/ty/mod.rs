@@ -36,12 +36,14 @@ use ty::util::{IntTypeExt, Discr};
 use ty::walk::TypeWalker;
 use util::captures::Captures;
 use util::nodemap::{NodeSet, DefIdMap, FxHashMap};
+use arena::SyncDroplessArena;
 
 use serialize::{self, Encodable, Encoder};
 use std::cell::RefCell;
 use std::cmp;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
 use std::ops::Deref;
 use rustc_data_structures::sync::Lrc;
 use std::slice;
@@ -570,23 +572,85 @@ impl <'gcx: 'tcx, 'tcx> Canonicalize<'gcx, 'tcx> for Ty<'tcx> {
     }
 }
 
+extern {
+    /// A dummy type used to force Slice to by unsized without requiring fat pointers
+    type OpaqueSliceContents;
+}
+
 /// A wrapper for slices with the additional invariant
 /// that the slice is interned and no other slice with
 /// the same contents can exist in the same context.
 /// This means we can use pointer + length for both
 /// equality comparisons and hashing.
-#[derive(Debug, RustcEncodable)]
-pub struct Slice<T>([T]);
+/// Empty slices are encoded in the pointer to this as `1`
+pub struct Slice<T>(PhantomData<T>, OpaqueSliceContents);
+
+const EMPTY_SLICE: usize = 1;
+
+impl<T> Slice<T> {
+    /// Returns the offset of the array
+    #[inline(always)]
+    fn offset() -> usize {
+        // Align up the size of the len (usize) field
+        let align = mem::align_of::<T>();
+        let align_mask = align - 1;
+        let offset = mem::size_of::<usize>();
+        (offset + align_mask) & !align_mask
+    }
+}
+
+impl<T: Copy> Slice<T> {
+    #[inline]
+    fn from_arena<'tcx>(arena: &'tcx SyncDroplessArena, slice: &[T]) -> &'tcx Slice<T> {
+        assert!(!mem::needs_drop::<T>());
+        assert!(mem::size_of::<T>() != 0);
+        assert!(slice.len() != 0);
+
+        let offset = Slice::<T>::offset();
+        let size = offset + slice.len() * mem::size_of::<T>();
+
+        let mem: *mut u8 = arena.alloc_raw(
+            size,
+            cmp::max(mem::align_of::<T>(), mem::align_of::<usize>())).as_mut_ptr();
+
+        unsafe {
+            // Write the length
+            *(mem as *mut usize) = slice.len();
+
+            // Write the elements
+            let arena_slice = slice::from_raw_parts_mut(
+                mem.offset(offset as isize) as *mut T,
+                slice.len());
+            arena_slice.copy_from_slice(slice);
+
+            &*(mem as *const Slice<T>)
+        }
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for Slice<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        (**self).fmt(f)
+    }
+}
+
+impl<T: Encodable> Encodable for Slice<T> {
+    #[inline]
+    fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
+        (**self).encode(s)
+    }
+}
 
 impl<T> PartialEq for Slice<T> {
     #[inline]
     fn eq(&self, other: &Slice<T>) -> bool {
-        (&self.0 as *const [T]) == (&other.0 as *const [T])
+        (self as *const _) == (other as *const _)
     }
 }
 impl<T> Eq for Slice<T> {}
 
 impl<T> Hash for Slice<T> {
+    #[inline]
     fn hash<H: Hasher>(&self, s: &mut H) {
         (self.as_ptr(), self.len()).hash(s)
     }
@@ -594,14 +658,24 @@ impl<T> Hash for Slice<T> {
 
 impl<T> Deref for Slice<T> {
     type Target = [T];
+    #[inline(always)]
     fn deref(&self) -> &[T] {
-        &self.0
+        unsafe {
+            if self as *const _ as usize == EMPTY_SLICE {
+                return &[];
+            }
+            let raw = self as *const _ as *const u8;
+            let len = *(raw as *const usize);
+            let slice = raw.offset(Slice::<T>::offset() as isize);
+            slice::from_raw_parts(slice as *const T, len)
+        }
     }
 }
 
 impl<'a, T> IntoIterator for &'a Slice<T> {
     type Item = &'a T;
     type IntoIter = <&'a [T] as IntoIterator>::IntoIter;
+    #[inline(always)]
     fn into_iter(self) -> Self::IntoIter {
         self[..].iter()
     }
@@ -610,9 +684,10 @@ impl<'a, T> IntoIterator for &'a Slice<T> {
 impl<'tcx> serialize::UseSpecializedDecodable for &'tcx Slice<Ty<'tcx>> {}
 
 impl<T> Slice<T> {
+    #[inline(always)]
     pub fn empty<'a>() -> &'a Slice<T> {
         unsafe {
-            mem::transmute(slice::from_raw_parts(0x1 as *const T, 0))
+            &*(EMPTY_SLICE as *const _)
         }
     }
 }
