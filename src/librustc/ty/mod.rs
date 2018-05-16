@@ -584,9 +584,9 @@ extern {
 /// equality comparisons and hashing.
 /// Empty slices are encoded in the pointer to this as `1`
 pub struct Slice<T>(PhantomData<T>, OpaqueSliceContents);
-
+/*
 const EMPTY_SLICE: usize = 1;
-
+*/
 impl<T> Slice<T> {
     /// Returns the offset of the array
     #[inline(always)]
@@ -641,13 +641,15 @@ impl<T: Encodable> Encodable for Slice<T> {
     }
 }
 
-impl<T> PartialEq for Slice<T> {
+impl<T: PartialEq> PartialEq for Slice<T> {
     #[inline]
     fn eq(&self, other: &Slice<T>) -> bool {
-        (self as *const _) == (other as *const _)
+        let r = (self as *const _) == (other as *const _);
+        assert_eq!(r, **self == **other);
+        r
     }
 }
-impl<T> Eq for Slice<T> {}
+impl<T: Eq> Eq for Slice<T> {}
 
 impl<T> Hash for Slice<T> {
     #[inline]
@@ -661,9 +663,9 @@ impl<T> Deref for Slice<T> {
     #[inline(always)]
     fn deref(&self) -> &[T] {
         unsafe {
-            if self as *const _ as usize == EMPTY_SLICE {
+            /*if self as *const _ as usize == EMPTY_SLICE {
                 return &[];
-            }
+            }*/
             let raw = self as *const _ as *const u8;
             let len = *(raw as *const usize);
             let slice = raw.offset(Slice::<T>::offset() as isize);
@@ -686,8 +688,9 @@ impl<'tcx> serialize::UseSpecializedDecodable for &'tcx Slice<Ty<'tcx>> {}
 impl<T> Slice<T> {
     #[inline(always)]
     pub fn empty<'a>() -> &'a Slice<T> {
+        static EMPTY_SLICE: [usize; 32] = [0; 32];
         unsafe {
-            &*(EMPTY_SLICE as *const _)
+            &*(&EMPTY_SLICE as *const _ as *const Slice<T>)
         }
     }
 }
