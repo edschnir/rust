@@ -582,11 +582,8 @@ extern {
 /// the same contents can exist in the same context.
 /// This means we can use pointer + length for both
 /// equality comparisons and hashing.
-/// Empty slices are encoded in the pointer to this as `1`
 pub struct Slice<T>(PhantomData<T>, OpaqueSliceContents);
-/*
-const EMPTY_SLICE: usize = 1;
-*/
+
 impl<T> Slice<T> {
     /// Returns the offset of the array
     #[inline(always)]
@@ -663,9 +660,6 @@ impl<T> Deref for Slice<T> {
     #[inline(always)]
     fn deref(&self) -> &[T] {
         unsafe {
-            /*if self as *const _ as usize == EMPTY_SLICE {
-                return &[];
-            }*/
             let raw = self as *const _ as *const u8;
             let len = *(raw as *const usize);
             let slice = raw.offset(Slice::<T>::offset() as isize);
@@ -688,7 +682,10 @@ impl<'tcx> serialize::UseSpecializedDecodable for &'tcx Slice<Ty<'tcx>> {}
 impl<T> Slice<T> {
     #[inline(always)]
     pub fn empty<'a>() -> &'a Slice<T> {
-        static EMPTY_SLICE: [usize; 32] = [0; 32];
+        #[repr(align(64), C)]
+        struct EmptySlice([usize; 64]);
+        static EMPTY_SLICE: EmptySlice = EmptySlice([0; 64]);
+        assert!(mem::align_of::<T>() <= 64);
         unsafe {
             &*(&EMPTY_SLICE as *const _ as *const Slice<T>)
         }
